@@ -205,7 +205,7 @@ class _STTHomePageState extends State<STTHomePage> {
   Future<void> _checkBackendHealth() async {
     try {
       final response = await http.get(
-        Uri.parse('http://localhost:8000/health'),
+        Uri.parse('https://smartdukan-voice-billing-production.up.railway.app/health'),
       ).timeout(const Duration(seconds: 2));
       
       if (response.statusCode == 200) {

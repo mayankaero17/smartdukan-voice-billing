@@ -35,7 +35,7 @@ class BillingResponse {
 }
 
 class BillingService {
-  static const String _baseUrl = 'http://localhost:8000';
+  static const String _baseUrl = 'https://smartdukan-voice-billing-production.up.railway.app';
 
   Future<BillingResponse> startBilling({
     required Uint8List audioBytes,
