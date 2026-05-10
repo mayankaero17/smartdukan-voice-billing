@@ -106,8 +106,8 @@ class _STTHomePageState extends State<STTHomePage> {
   // ─────────────────────────────────────────────────────────
 
   Future<void> _startRecording() async {
-    if (_apiKeyController.text.trim().isEmpty) {
-      setState(() => _errorLog = 'Please enter your Groq API Key first.');
+    if (!_useAgentBackend && _apiKeyController.text.trim().isEmpty) {
+      setState(() => _errorLog = 'Please enter your Groq API Key for direct mode, or use Agent Backend.');
       return;
     }
 
@@ -608,7 +608,7 @@ class _STTHomePageState extends State<STTHomePage> {
           controller: _apiKeyController,
           obscureText: true,
           decoration: InputDecoration(
-            labelText: 'Groq API Key',
+            labelText: _useAgentBackend ? 'Groq API Key (Optional in Agent Mode)' : 'Groq API Key (Required)',
             hintText: 'gsk_...',
             prefixIcon: const Icon(Icons.vpn_key),
             border: OutlineInputBorder(
