@@ -1,0 +1,11 @@
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-groq
+groq
+fastapi
+uvicorn
+python-multipart
+rapidfuzz
+supabase
+python-dotenv
+pydantic>=2.0

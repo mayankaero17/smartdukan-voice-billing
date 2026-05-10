@@ -1,0 +1,34 @@
+name: whisper_hindi_stt
+description: "Offline Hindi Speech-to-Text spike using Whisper.cpp via FFI"
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Audio recording with 16kHz PCM WAV support
+  record: ^6.1.1
+
+  # HTTP package for Groq Whisper API
+  http: ^1.2.0
+
+  # File path utilities
+  path_provider: ^2.1.5
+
+  # Runtime permission handling
+  permission_handler: ^11.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/models/
