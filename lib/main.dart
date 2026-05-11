@@ -708,17 +708,12 @@ class _STTHomePageState extends State<STTHomePage> {
               crossAxisAlignment:
                 CrossAxisAlignment.start,
               children: [
-                // Agent toggle only — no API key field
-                _buildConfigCard(),
-                const SizedBox(height: 12),
                 // Transcript output
                 _buildTranscriptCard(),
                 const SizedBox(height: 12),
                 // Mic button card
                 _buildMicCard(),
                 const Spacer(),
-                // STT / LLM timing row
-                _buildTimingRow(),
               ],
             ),
           ),
@@ -750,7 +745,7 @@ class _STTHomePageState extends State<STTHomePage> {
                         _filledButton(
                           'Save to History',
                           Icons.save_outlined,
-                          _saveToHistory,
+                          _billSaved ? null : () => _saveToHistory(),
                         ),
                       ],
                     ]),
@@ -813,46 +808,6 @@ class _STTHomePageState extends State<STTHomePage> {
     );
   }
 
-  Widget _buildConfigCard() {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1A1D27),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: Color(0xFFE2E8F0).withOpacity(0.06)),
-      ),
-      child: Row(children: [
-        const Expanded(
-          child: Column(
-            crossAxisAlignment:
-              CrossAxisAlignment.start,
-            children: [
-              Text('Agent Mode',
-                style: TextStyle(
-                  color: Color(0xFFE2E8F0),
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500)),
-              Text('LangGraph pipeline',
-                style: TextStyle(
-                  color: Color(0xFF475569),
-                  fontSize: 11)),
-            ],
-          ),
-        ),
-        Switch(
-          value: _useAgentBackend,
-          onChanged: (v) {
-            setState(() => _useAgentBackend = v);
-            _checkBackendHealth();
-          },
-          activeColor: const Color(0xFF4ADE80),
-        ),
-      ]),
-    );
-  }
-
   Widget _buildTranscriptCard() {
     return Container(
       constraints: const BoxConstraints(
@@ -901,6 +856,8 @@ class _STTHomePageState extends State<STTHomePage> {
   }
 
   Widget _buildMicCard() {
+    final bool isProcessing = _isExtracting || _isTranscribing || _lastAgentResponse?.status == 'needs_clarification';
+    
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 24),
       decoration: BoxDecoration(
@@ -914,15 +871,11 @@ class _STTHomePageState extends State<STTHomePage> {
       child: Column(
         children: [
           GestureDetector(
-            onTapDown: (_) => 
-              _startRecording(),
-            onTapUp: (_) => 
-              _stopRecordingAndTranscribe(),
-            onTapCancel: () =>
-              _stopRecordingAndTranscribe(),
+            onTapDown: isProcessing ? null : (_) => _startRecording(),
+            onTapUp: isProcessing ? null : (_) => _stopRecordingAndTranscribe(),
+            onTapCancel: isProcessing ? null : () => _stopRecordingAndTranscribe(),
             child: AnimatedContainer(
-              duration: const Duration(
-                milliseconds: 200),
+              duration: const Duration(milliseconds: 200),
               width: 64,
               height: 64,
               decoration: BoxDecoration(
@@ -937,21 +890,25 @@ class _STTHomePageState extends State<STTHomePage> {
                   width: 2),
                 boxShadow: _isRecording ? [
                   BoxShadow(
-                    color: const Color(0xFF4ADE80)
-                      .withOpacity(0.3),
+                    color: const Color(0xFF4ADE80).withOpacity(0.3),
                     blurRadius: 16,
                     spreadRadius: 2),
                 ] : [],
               ),
-              child: Icon(
-                _isRecording
-                  ? Icons.mic
-                  : Icons.mic_none_outlined,
-                color: _isRecording
-                  ? Colors.black
-                  : const Color(0xFF64748B),
-                size: 28,
-              ),
+              child: isProcessing 
+                ? const Padding(
+                    padding: EdgeInsets.all(16.0),
+                    child: CircularProgressIndicator(color: Color(0xFF4ADE80), strokeWidth: 2),
+                  )
+                : Icon(
+                    _isRecording
+                      ? Icons.mic
+                      : Icons.mic_none_outlined,
+                    color: _isRecording
+                      ? Colors.black
+                      : const Color(0xFF64748B),
+                    size: 28,
+                  ),
             ),
           ),
           const SizedBox(height: 10),
@@ -959,8 +916,8 @@ class _STTHomePageState extends State<STTHomePage> {
             child: Text(
               _isRecording
                 ? 'Recording...'
-                : _isTranscribing
-                  ? 'Transcribing...'
+                : isProcessing
+                  ? 'Processing your order...'
                   : 'Hold to speak',
               style: TextStyle(
                 color: _isRecording
@@ -968,47 +925,6 @@ class _STTHomePageState extends State<STTHomePage> {
                   : const Color(0xFF475569),
                 fontSize: 12)),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTimingRow() {
-    return Row(children: [
-      _timingPill(
-        Icons.graphic_eq,
-        'STT',
-        _inferenceTime),
-      const SizedBox(width: 8),
-      _timingPill(
-        Icons.memory_outlined,
-        'LLM',
-        _llmTime),
-    ]);
-  }
-
-  Widget _timingPill(
-      IconData icon, String label, String value) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1A1D27),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: Color(0xFFE2E8F0).withOpacity(0.06)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon,
-            size: 11,
-            color: const Color(0xFF475569)),
-          const SizedBox(width: 4),
-          Text('$label: $value',
-            style: const TextStyle(
-              color: Color(0xFF94A3B8),
-              fontSize: 11)),
         ],
       ),
     );
@@ -1046,7 +962,8 @@ class _STTHomePageState extends State<STTHomePage> {
   }
 
   Widget _filledButton(
-      String label, IconData icon, VoidCallback onTap) {
+      String label, IconData icon, VoidCallback? onTap) {
+    final isDisabled = onTap == null;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
@@ -1054,7 +971,7 @@ class _STTHomePageState extends State<STTHomePage> {
         padding: const EdgeInsets.symmetric(
           horizontal: 14, vertical: 8),
         decoration: BoxDecoration(
-          color: const Color(0xFF4ADE80),
+          color: isDisabled ? const Color(0xFF334155) : const Color(0xFF4ADE80),
           borderRadius: BorderRadius.circular(8),
         ),
         child: Row(
@@ -1062,11 +979,11 @@ class _STTHomePageState extends State<STTHomePage> {
           children: [
             Icon(icon,
               size: 13,
-              color: Colors.black),
+              color: isDisabled ? const Color(0xFF94A3B8) : Colors.black),
             const SizedBox(width: 6),
             Text(label,
-              style: const TextStyle(
-                color: Colors.black,
+              style: TextStyle(
+                color: isDisabled ? const Color(0xFF94A3B8) : Colors.black,
                 fontSize: 12,
                 fontWeight: FontWeight.w600)),
           ],
@@ -1821,68 +1738,79 @@ Widget _buildAgentTracePanel() {
 
   Widget _buildClarificationTable() {
     final pending = _lastAgentResponse?.pendingClarifications ?? [];
-    return SingleChildScrollView(
-      child: Table(
-        columnWidths: const {
-          0: FlexColumnWidth(1.5),
-          1: FlexColumnWidth(2.5),
-          2: IntrinsicColumnWidth(),
-        },
-        border: TableBorder(
-          horizontalInside: BorderSide(color: Color(0xFFE2E8F0).withOpacity(0.06), width: 0.5),
-        ),
-        children: [
-          TableRow(
-            decoration: BoxDecoration(color: Colors.amber.withOpacity(0.1)),
-            children: const [
-              Padding(padding: EdgeInsets.all(8.0), child: Text('Spoken', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-              Padding(padding: EdgeInsets.all(8.0), child: Text('Match Selection', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-              Padding(padding: EdgeInsets.all(8.0), child: Text('Score', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SingleChildScrollView(
+          child: Table(
+            columnWidths: const {
+              0: FlexColumnWidth(1.5),
+              1: FlexColumnWidth(2.5),
+              2: IntrinsicColumnWidth(),
+            },
+            border: TableBorder(
+              horizontalInside: BorderSide(color: Color(0xFFE2E8F0).withOpacity(0.06), width: 0.5),
+            ),
+            children: [
+              TableRow(
+                decoration: BoxDecoration(color: Colors.amber.withOpacity(0.1)),
+                children: const [
+                  Padding(padding: EdgeInsets.all(8.0), child: Text('Spoken', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+                  Padding(padding: EdgeInsets.all(8.0), child: Text('Match Selection', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+                  Padding(padding: EdgeInsets.all(8.0), child: Text('Score', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+                ],
+              ),
+              ...List.generate(pending.length, (index) {
+                final item = pending[index];
+                final candidates = item['candidates'] as List? ?? [];
+                final selectedSkuId = _selectedResolutions[index];
+
+                return TableRow(
+                  decoration: BoxDecoration(color: Colors.amber.withOpacity(0.05)),
+                  children: [
+                    Padding(padding: const EdgeInsets.all(8.0), child: Text(item['name_raw'] ?? '-', style: const TextStyle(fontSize: 13))),
+                    Padding(
+                      padding: const EdgeInsets.all(4.0),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: selectedSkuId,
+                          isExpanded: true,
+                          style: const TextStyle(color: Color(0xFFE2E8F0), fontSize: 12),
+                          dropdownColor: const Color(0xFF1A1D27),
+                          items: candidates.map<DropdownMenuItem<String>>((c) {
+                            return DropdownMenuItem<String>(
+                              value: c['sku_id'],
+                              child: Text(c['name'], overflow: TextOverflow.ellipsis),
+                            );
+                          }).toList(),
+                          onChanged: (val) {
+                            if (val != null) {
+                              setState(() => _selectedResolutions[index] = val);
+                        }
+                          },
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.all(8.0),
+                      child: Text(
+                        candidates.firstWhere((c) => c['sku_id'] == selectedSkuId)['score']?.toString() ?? '-',
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                );
+              }),
             ],
           ),
-          ...List.generate(pending.length, (index) {
-            final item = pending[index];
-            final candidates = item['candidates'] as List? ?? [];
-            final selectedSkuId = _selectedResolutions[index];
-
-            return TableRow(
-              decoration: BoxDecoration(color: Colors.amber.withOpacity(0.05)),
-              children: [
-                Padding(padding: const EdgeInsets.all(8.0), child: Text(item['name_raw'] ?? '-', style: const TextStyle(fontSize: 13))),
-                Padding(
-                  padding: const EdgeInsets.all(4.0),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<String>(
-                      value: selectedSkuId,
-                      isExpanded: true,
-                      style: const TextStyle(color: Color(0xFFE2E8F0), fontSize: 12),
-                      dropdownColor: const Color(0xFF1A1D27),
-                      items: candidates.map<DropdownMenuItem<String>>((c) {
-                        return DropdownMenuItem<String>(
-                          value: c['sku_id'],
-                          child: Text(c['name'], overflow: TextOverflow.ellipsis),
-                        );
-                      }).toList(),
-                      onChanged: (val) {
-                        if (val != null) {
-                          setState(() => _selectedResolutions[index] = val);
-                        }
-                      },
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.all(8.0),
-                  child: Text(
-                    candidates.firstWhere((c) => c['sku_id'] == selectedSkuId)['score']?.toString() ?? '-',
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-                  ),
-                ),
-              ],
-            );
-          }),
-        ],
-      ),
+        ),
+        const SizedBox(height: 16),
+        _filledButton(
+          'Confirm Selections',
+          Icons.check_circle_outline,
+          () => _handleResolve(),
+        ),
+      ],
     );
   }
 
@@ -1959,17 +1887,11 @@ Widget _buildAgentTracePanel() {
 
   Widget _buildBillSummary() {
     double subtotal = 0;
-    double totalPayable = 0;
-    double gstCollected = 0;
     
     if (_useAgentBackend && _lastAgentResponse?.bill != null) {
       subtotal = (_lastAgentResponse!.bill!['subtotal'] ?? 0.0).toDouble();
-      totalPayable = (_lastAgentResponse!.bill!['total_payable'] ?? 0.0).toDouble();
-      final gstBreakdown = _lastAgentResponse!.bill!['gst_breakdown'] as Map? ?? {};
-      gstBreakdown.forEach((k, v) => gstCollected += (v as num).toDouble());
     } else {
       subtotal = _billingItems.fold(0.0, (sum, item) => sum + ((item['total_price'] as num?)?.toDouble() ?? 0.0));
-      totalPayable = subtotal;
     }
 
     return Container(
@@ -1989,20 +1911,12 @@ Widget _buildAgentTracePanel() {
               Text('Subtotal: ₹${subtotal.toStringAsFixed(2)}', style: const TextStyle(fontSize: 14)),
             ],
           ),
-          const SizedBox(height: 8),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text('GST Collected:', style: TextStyle(fontSize: 14)),
-              Text('₹${gstCollected.toStringAsFixed(2)}', style: const TextStyle(fontSize: 14)),
-            ],
-          ),
           Divider(height: 24, color: Color(0xFFE2E8F0).withOpacity(0.06)),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text('Total Payable:', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-              Text('₹${totalPayable.toStringAsFixed(2)}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF4ADE80))),
+              Text('₹${subtotal.toStringAsFixed(2)}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF4ADE80))),
             ],
           ),
         ],
