@@ -1,5 +1,5 @@
 [build]
-  command = "flutter build web --dart-define=BACKEND_URL=$BACKEND_URL"
+  command = "git clone https://github.com/flutter/flutter.git -b stable && export PATH=\"$PATH:`pwd`/flutter/bin\" && flutter build web --dart-define=BACKEND_URL=$BACKEND_URL"
   publish = "build/web"
 
 [[redirects]]
