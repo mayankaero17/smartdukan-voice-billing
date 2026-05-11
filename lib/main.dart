@@ -764,7 +764,7 @@ class _STTHomePageState extends State<STTHomePage> {
                   ? 12 : 0),
                 // Bill table — scrollable
                 Expanded(
-                  child: _billingItems.isEmpty && !_isExtracting && !_isTranscribing
+                  child: _billingItems.isEmpty && !_isExtracting && !_isTranscribing && _lastAgentResponse?.status != 'needs_clarification'
                     ? _buildEmptyBillState()
                     : SingleChildScrollView(
                         child: Column(
