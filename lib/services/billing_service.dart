@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:whisper_hindi_stt/config.dart';
+import 'package:whisper_hindi_stt/services/catalog_service.dart';
 
 class BillingResponse {
   final String status;
