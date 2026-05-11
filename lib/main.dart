@@ -75,6 +75,8 @@ class _STTHomePageState extends State<STTHomePage> {
 
   // New State
   int _selectedNav = 0;
+  final List<dynamic> _billHistory = [];
+  final List<dynamic> _skuCatalog = [];
   bool _billSaved = false;
   String _searchQuery = '';
   int _expandedHistoryIndex = -1;
