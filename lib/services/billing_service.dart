@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:http/http.dart' as http;
+import 'package:whisper_hindi_stt/config.dart';
 
 class BillingResponse {
   final String status;
@@ -28,14 +29,14 @@ class BillingResponse {
       transcript: json['transcript'],
       pendingClarifications: json['pending_clarifications'] ?? [],
       partialBill: json['partial_bill'] ?? [],
-      bill: json['bill'],
+      bill: json['bill'] ?? (json.containsKey('items') ? {'items': json['items']} : null),
       flaggedItems: json['flagged_items'] ?? [],
     );
   }
 }
 
 class BillingService {
-  static const String _baseUrl = 'https://smartdukan-voice-billing-production.up.railway.app';
+  static const String _baseUrl = backendUrl;
 
   Future<BillingResponse> startBilling({
     required Uint8List audioBytes,
@@ -47,6 +48,14 @@ class BillingService {
     final request = http.MultipartRequest('POST', uri)
       ..fields['shop_id'] = shopId
       ..fields['session_id'] = sessionId;
+
+    try {
+      final catalogService = CatalogService();
+      final catalog = catalogService.loadCatalog();
+      request.fields['shop_catalog'] = jsonEncode(catalog);
+    } catch (e) {
+      print('Error loading catalog for billing: $e');
+    }
 
     request.files.add(
       http.MultipartFile.fromBytes(
@@ -87,6 +96,34 @@ class BillingService {
       return BillingResponse.fromJson(jsonDecode(response.body));
     } else {
       throw Exception('Failed to resolve items: ${response.statusCode}\n${response.body}');
+    }
+  }
+
+  Future<BillingResponse> simpleBilling({
+    required Uint8List audioBytes,
+    required String sessionId,
+  }) async {
+    final uri = Uri.parse('$_baseUrl/billing/simple');
+    
+    final request = http.MultipartRequest('POST', uri)
+      ..fields['session_id'] = sessionId;
+
+    request.files.add(
+      http.MultipartFile.fromBytes(
+        'audio_file',
+        audioBytes,
+        filename: 'simple_$sessionId.wav',
+      ),
+    );
+
+    final streamedResponse = await request.send();
+    final response = await http.Response.fromStream(streamedResponse);
+
+    if (response.statusCode == 200) {
+      print('AGENT RESPONSE (SIMPLE): ${response.body}');
+      return BillingResponse.fromJson(jsonDecode(response.body));
+    } else {
+      throw Exception('Failed to run simple billing: ${response.statusCode}\n${response.body}');
     }
   }
 }

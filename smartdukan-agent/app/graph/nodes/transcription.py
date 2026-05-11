@@ -28,11 +28,12 @@ def transcription_node(state: BillingState) -> dict:
 
     try:
         client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-
         with open(raw_audio_path, "rb") as audio_file:
             response = client.audio.transcriptions.create(
                 file=(os.path.basename(raw_audio_path), audio_file),
                 model="whisper-large-v3-turbo",
+                language="hi",
+                prompt="Kirana store billing in Hindi and English mix. Items like Aloo, Chawal, Maggi, Sabun, Tel, Atta, Doodh, Namak, Pyaaz.",
                 response_format="verbose_json"
             )
 

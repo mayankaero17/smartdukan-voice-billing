@@ -6,6 +6,7 @@ class ParsedItem(BaseModel):
     name_raw: str
     qty: float
     unit: Optional[str] = None
+    spoken_unit_price: Optional[float] = None
     price_spoken: Optional[float] = None
     price_type: Optional[str] = None  # "unit" or "total"
     unit_price: Optional[float] = None

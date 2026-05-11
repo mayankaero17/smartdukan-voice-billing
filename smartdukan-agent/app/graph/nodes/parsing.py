@@ -30,6 +30,8 @@ Each element must have these keys:
   If unit explicitly spoken, use that.
   Only set null if you truly cannot determine.
 
+- spoken_unit_price: number or null. The inline price mentioned for the item if any. (e.g. "X rupaye", "X ka", "X wala", "X per kilo"). Null if not spoken.
+
 - price_spoken: number or null. Price mentioned. Null if not spoken.
 
 - price_type: "unit" or "total" or null.
@@ -70,30 +72,30 @@ Hindi price words:
 Examples:
 
 Input: "do kilo aalu tees rupaye kilo"
-Output: [{"name_raw":"Aloo","qty":2,"unit":"kg",
+Output: [{"name_raw":"Aloo","qty":2,"unit":"kg","spoken_unit_price":30,
 "price_spoken":30,"price_type":"unit",
 "unit_price":30,"total_price":60,
 "missing_info":false,"uncertain":false}]
 
 Input: "teen packet Maggi pachaas rupaye"
-Output: [{"name_raw":"Maggi Noodles","qty":3,"unit":"packet",
+Output: [{"name_raw":"Maggi Noodles","qty":3,"unit":"packet","spoken_unit_price":null,
 "price_spoken":50,"price_type":"total",
 "unit_price":16.67,"total_price":50,
 "missing_info":false,"uncertain":false}]
 
 Input: "aadha kilo haldi"
-Output: [{"name_raw":"Haldi","qty":0.5,"unit":"kg",
+Output: [{"name_raw":"Haldi","qty":0.5,"unit":"kg","spoken_unit_price":null,
 "price_spoken":null,"price_type":null,
 "unit_price":null,"total_price":null,
 "missing_info":true,"uncertain":false}]
 
 Input: "ek litre sarso ka tel aur do sabun"
 Output: [
-{"name_raw":"Sarso Tel","qty":1,"unit":"litre",
+{"name_raw":"Sarso Tel","qty":1,"unit":"litre","spoken_unit_price":null,
 "price_spoken":null,"price_type":null,
 "unit_price":null,"total_price":null,
 "missing_info":true,"uncertain":false},
-{"name_raw":"Sabun","qty":2,"unit":"piece",
+{"name_raw":"Sabun","qty":2,"unit":"piece","spoken_unit_price":null,
 "price_spoken":null,"price_type":null,
 "unit_price":null,"total_price":null,
 "missing_info":true,"uncertain":false}
@@ -171,6 +173,7 @@ def parsing_node(state: BillingState) -> dict:
                 name_raw=name_raw,
                 qty=float(item.get("qty", 1.0)),
                 unit=item.get("unit"),
+                spoken_unit_price=item.get("spoken_unit_price"),
                 price_spoken=item.get("price_spoken"),
                 price_type=item.get("price_type"),
                 unit_price=item.get("unit_price"),

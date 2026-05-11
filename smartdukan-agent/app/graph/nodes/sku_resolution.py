@@ -33,12 +33,12 @@ async def sku_resolution_node(state: BillingState) -> dict:
         
         # Determine if it's ambiguous based on score spread or top score range
         is_ambiguous = (
-            (50 <= score1 < 80) or 
+            (50 <= score1 < 85) or 
             item.uncertain or 
             (top_match and second_match and (score1 - score2 <= 10))
         )
         
-        if top_match and score1 >= 80 and not item.uncertain:
+        if top_match and score1 >= 85 and not item.uncertain:
             # Path A: Confident Match
             catalog_entry = catalog[top_match[2]]
             
@@ -63,6 +63,28 @@ async def sku_resolution_node(state: BillingState) -> dict:
                 **parsed_data,
                 sku_id=catalog_entry["sku_id"],
                 sku_name=catalog_entry["name"],
+                unit_price=unit_price,
+                total_price=total_price,
+                gst_slab=gst_slab,
+                gst_amount=gst_amount,
+                status="confirmed"
+            )
+            resolved_items.append(resolved_item)
+            
+        elif score1 < 85 and getattr(item, "spoken_unit_price", None) is not None:
+            # Fallback: Create ConfirmedItem using raw spoken name and spoken price
+            unit_price = item.spoken_unit_price
+            total_price = item.qty * unit_price
+            
+            # Assuming 0% GST for unknown items
+            gst_slab = 0
+            gst_amount = 0.0
+            
+            parsed_data = item.model_dump(exclude={"unit_price", "total_price"})
+            resolved_item = ResolvedItem(
+                **parsed_data,
+                sku_id=None,
+                sku_name=item.name_raw,
                 unit_price=unit_price,
                 total_price=total_price,
                 gst_slab=gst_slab,

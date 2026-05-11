@@ -5,7 +5,9 @@ from pydantic import BaseModel
 from langgraph.types import Command
 
 from app.graph import compiled_graph
-from app.graph.state import CorrectionSignal, ResolvedItem
+from app.graph.state import CorrectionSignal, ResolvedItem, BillingState
+from app.graph.nodes.transcription import transcription_node
+from app.graph.nodes.parsing import parsing_node
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -165,6 +167,43 @@ async def resolve_billing(req: ResolveRequest):
     except Exception as e:
         logger.exception(f"Error resuming graph: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/billing/simple")
+async def simple_billing(
+    audio_file: UploadFile = File(...),
+    session_id: str = Form(...)
+):
+    """
+    Direct transcription + extraction without the full agentic loop.
+    Uses the backend's Groq key.
+    """
+    temp_path = f"/tmp/simple_{session_id}.wav"
+    try:
+        contents = await audio_file.read()
+        with open(temp_path, "wb") as buffer:
+            buffer.write(contents)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Could not save audio file")
+
+    # 1. Transcription
+    state = BillingState(raw_audio_path=temp_path, session_id=session_id)
+    t_res = transcription_node(state)
+    transcript = t_res.get("transcript", "")
+
+    if not transcript:
+        return {"status": "complete", "transcript": "", "items": []}
+
+    # 2. Parsing (Extraction)
+    state["transcript"] = transcript
+    p_res = parsing_node(state)
+    parsed_items = p_res.get("parsed_items", [])
+
+    return {
+        "status": "complete",
+        "session_id": session_id,
+        "transcript": transcript,
+        "items": [item.model_dump() for item in parsed_items]
+    }
 
 @router.get("/billing/session/{session_id}")
 async def get_session(session_id: str):

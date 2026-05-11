@@ -9,6 +9,11 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 import 'package:whisper_hindi_stt/services/billing_service.dart';
+import 'package:whisper_hindi_stt/services/catalog_service.dart';
+import 'package:whisper_hindi_stt/screens/catalog_screen.dart';
+import 'package:whisper_hindi_stt/services/history_service.dart';
+import 'package:whisper_hindi_stt/screens/history_screen.dart';
+import 'package:whisper_hindi_stt/config.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -24,9 +29,13 @@ class WhisperHindiSTTApp extends StatelessWidget {
       title: 'Voice Billing AI',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF6C63FF),
-          brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF0F1117),
+        colorScheme: const ColorScheme.dark(
+          surface: Color(0xFF0F1117),
+          primary: Color(0xFF4ADE80),
+          secondary: Color(0xFF4ADE80),
+          error: Color(0xFFF87171),
+          tertiary: Color(0xFFFBBF24),
         ),
         useMaterial3: true,
         fontFamily: 'Roboto',
@@ -55,7 +64,7 @@ class _STTHomePageState extends State<STTHomePage> {
   String _errorLog = '';
   List<Map<String, dynamic>> _billingItems = [];
   String _rawJson = '';
-  bool _useAgentBackend = false;
+  bool _useAgentBackend = true;
   final BillingService _billingService = BillingService();
   BillingResponse? _lastAgentResponse;
   Map<int, String> _selectedResolutions = {}; // index -> sku_id
@@ -64,19 +73,28 @@ class _STTHomePageState extends State<STTHomePage> {
   bool _showAgentPanel = false;
   List<Map<String, dynamic>> _agentTrace = [];
 
+  // New State
+  int _selectedNav = 0;
+  bool _billSaved = false;
+  String _searchQuery = '';
+  int _expandedHistoryIndex = -1;
+
   late final AudioRecorder _recorder;
 
   @override
   void initState() {
     super.initState();
     _recorder = AudioRecorder();
+    
     _checkBackendHealth();
+    CatalogService().loadCatalog(); // ensure catalog is initialized
   }
 
   @override
   void dispose() {
     _apiKeyController.dispose();
     _recorder.dispose();
+    
     super.dispose();
   }
 
@@ -106,10 +124,7 @@ class _STTHomePageState extends State<STTHomePage> {
   // ─────────────────────────────────────────────────────────
 
   Future<void> _startRecording() async {
-    if (!_useAgentBackend && _apiKeyController.text.trim().isEmpty) {
-      setState(() => _errorLog = 'Please enter your Groq API Key for direct mode, or use Agent Backend.');
-      return;
-    }
+
 
     if (!await _ensureMicPermission()) return;
 
@@ -191,7 +206,7 @@ class _STTHomePageState extends State<STTHomePage> {
       if (_useAgentBackend) {
         await _runAgentPipeline(audioBytes);
       } else {
-        await _transcribeWithGroq(audioBytes);
+        await _runSimplePipeline(audioBytes);
       }
     } catch (e) {
       debugPrint('[Recorder] Stop error: $e');
@@ -205,7 +220,7 @@ class _STTHomePageState extends State<STTHomePage> {
   Future<void> _checkBackendHealth() async {
     try {
       final response = await http.get(
-        Uri.parse('https://smartdukan-voice-billing-production.up.railway.app/health'),
+        Uri.parse('$backendUrl/health'),
       ).timeout(const Duration(seconds: 2));
       
       if (response.statusCode == 200) {
@@ -326,11 +341,10 @@ class _STTHomePageState extends State<STTHomePage> {
         });
       }
     } catch (e) {
-      _addTrace('backend', 'error', 'Backend unreachable, fell back to direct Groq: $e');
+      _addTrace('backend', 'error', 'Backend unreachable: $e');
       setState(() {
-        _errorLog = 'AGENT FALLBACK: Backend unreachable, running direct Groq. Reason: $e';
+        _errorLog = 'Backend error: Could not reach the agent backend at $backendUrl. Make sure uvicorn is running.\n\nDetails: $e';
       });
-      await _transcribeWithGroq(audioBytes);
     } finally {
       setState(() {
         _isTranscribing = false;
@@ -387,415 +401,1423 @@ class _STTHomePageState extends State<STTHomePage> {
   }
 
   // ─────────────────────────────────────────────────────────
-  // TRANSCRIPTION VIA GROQ API
+  // DIRECT MODE (SIMPLE PIPELINE VIA BACKEND)
   // ─────────────────────────────────────────────────────────
 
-  Future<void> _transcribeWithGroq(Uint8List audioBytes) async {
+  Future<void> _runSimplePipeline(Uint8List audioBytes) async {
+    _agentTrace = []; // clear previous trace
+    _addTrace('session', 'info', 'New DIRECT billing session started');
+
     setState(() {
       _isTranscribing = true;
+      _isExtracting = true;
       _transcribedText = '';
-      _errorLog = '';
+      _billingItems = [];
+      _errorLog = 'DIRECT MODE: Sending to backend /billing/simple...';
+      _rawJson = '';
     });
-
-    final apiKey = _apiKeyController.text.trim();
-    final uri = Uri.parse('https://api.groq.com/openai/v1/audio/transcriptions');
 
     try {
       final sw = Stopwatch()..start();
-
-      final request = http.MultipartRequest('POST', uri)
-        ..headers['Authorization'] = 'Bearer $apiKey'
-        ..fields['model'] = 'whisper-large-v3-turbo'
-        ..fields['language'] = 'hi'
-        ..fields['response_format'] = 'json';
-
-      request.files.add(
-        http.MultipartFile.fromBytes(
-          'file',
-          audioBytes,
-          filename: 'audio.wav',
-        ),
+      final response = await _billingService.simpleBilling(
+        audioBytes: audioBytes,
+        sessionId: DateTime.now().millisecondsSinceEpoch.toString(),
       );
-
-      final streamedResponse = await request.send();
-      final response = await http.Response.fromStream(streamedResponse);
-      
       sw.stop();
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final text = data['text'] ?? '';
-        setState(() {
-          _transcribedText = text.isNotEmpty ? text : '(no speech detected)';
-          _inferenceTime = '${sw.elapsedMilliseconds}ms';
-        });
+      setState(() {
+        _inferenceTime = '${sw.elapsedMilliseconds}ms';
+        _llmTime = '--'; // Simple mode does it in one shot, we just track total time
+      });
 
-        // Trigger LLM Extraction if text exists
-        if (text.isNotEmpty) {
-          await _extractBillingItems(text);
-        }
+      if (response.status == 'complete') {
+        final items = response.bill?['items'] as List? ?? [];
+        setState(() {
+          _transcribedText = response.transcript ?? 'Direct pipeline complete';
+          _rawJson = '';
+          _billingItems = items.map<Map<String, dynamic>>((item) => {
+            'name': item['name'],
+            'quantity': item['qty'],
+            'unit_price': item['unit_price'],
+            'total_price': item['total_price'],
+            'is_unit_price': true,
+            'missing_info': null,
+          }).toList();
+        });
       } else {
         setState(() {
-          _errorLog = 'STT API Error (${response.statusCode}):\n${response.body}';
+          _errorLog = 'Direct API Error: unexpected status ${response.status}';
         });
       }
     } catch (e) {
       setState(() {
-        _errorLog = 'Network Error during STT:\n$e';
+        _errorLog = 'Direct Mode Error: Could not reach the backend at $backendUrl. Make sure uvicorn is running.\\n\\nDetails: $e';
       });
     } finally {
       setState(() {
         _isTranscribing = false;
-      });
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────
-  // LLM BILLING EXTRACTION VIA GROQ
-  // ─────────────────────────────────────────────────────────
-
-  Future<void> _extractBillingItems(String text) async {
-    setState(() {
-      _isExtracting = true;
-      _billingItems = [];
-      _rawJson = '';
-    });
-
-    final apiKey = _apiKeyController.text.trim();
-    final uri = Uri.parse('https://api.groq.com/openai/v1/chat/completions');
-
-    try {
-      final sw = Stopwatch()..start();
-
-      final response = await http.post(
-        uri,
-        headers: {
-          'Authorization': 'Bearer $apiKey',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          "model": "llama-3.3-70b-versatile",
-          "messages": [
-            {
-              "role": "system",
-              "content": "You are a billing extraction assistant. Extract billing items from the user's speech (Hindi, English, or Hinglish). Identify if the price mentioned is a unit price or a total price. If it is a unit price, calculate the total_price (quantity * unit_price). If info is missing to make the bill (e.g. missing price or quantity), flag it. Return ONLY valid JSON and nothing else: {\"items\": [{\"name\": \"item name\", \"quantity\": 2, \"unit_price\": 50.0, \"total_price\": 100.0, \"is_unit_price\": true, \"missing_info\": null}]}. If missing info, set missing_info to a short string like 'Missing price'."
-            },
-            {
-              "role": "user",
-              "content": text
-            }
-          ],
-          "response_format": {"type": "json_object"},
-          "temperature": 0.0,
-        }),
-      );
-
-      sw.stop();
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final content = data['choices'][0]['message']['content'];
-        
-        setState(() {
-          _llmTime = '${sw.elapsedMilliseconds}ms';
-          _rawJson = content;
-        });
-
-        try {
-          final Map<String, dynamic> parsedJson = jsonDecode(content);
-          if (parsedJson.containsKey('items') && parsedJson['items'] is List) {
-            setState(() {
-              _billingItems = List<Map<String, dynamic>>.from(parsedJson['items']);
-            });
-          }
-        } catch (e) {
-          debugPrint('JSON Parse error: $e');
-        }
-
-      } else {
-        setState(() {
-          _errorLog = 'LLM API Error (${response.statusCode}):\n${response.body}';
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _errorLog = 'Network Error during LLM extraction:\n$e';
-      });
-    } finally {
-      setState(() {
         _isExtracting = false;
       });
     }
   }
 
-
   // ─────────────────────────────────────────────────────────
-  // UI
+  // UI NEW IMPLEMENTATION
   // ─────────────────────────────────────────────────────────
 
   @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+  
+  @override
 
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: cs.surface,
+      backgroundColor: const Color(0xFF0F1117),
       appBar: AppBar(
-        title: const Text('Voice Billing AI'),
-        centerTitle: true,
-        backgroundColor: cs.surface,
-        surfaceTintColor: Colors.transparent,
+        backgroundColor: const Color(0xFF111318),
+        elevation: 0,
+        title: const Text('Voice Billing AI',
+          style: TextStyle(
+            color: Color(0xFFE2E8F0),
+            fontSize: 16,
+            fontWeight: FontWeight.w600)),
         actions: [
           IconButton(
             icon: Icon(
               Icons.account_tree_outlined,
-              color: _showAgentPanel 
-                ? const Color(0xFF00C853) 
-                : Colors.white38,
-              size: 20,
-            ),
-            tooltip: 'Agent Trace',
-            onPressed: () => setState(() => _showAgentPanel = !_showAgentPanel),
+              color: _showAgentPanel
+                ? const Color(0xFF4ADE80)
+                : const Color(0xFF475569),
+              size: 18),
+            onPressed: () => setState(() =>
+              _showAgentPanel = !_showAgentPanel),
           ),
           const SizedBox(width: 8),
         ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Container(
+            color: Color(0xFFE2E8F0).withOpacity(0.06),
+            height: 1)),
       ),
-      body: SafeArea(
-        child: Row(
-          children: [
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+      body: Stack(
+        children: [
+          Row(
+            children: [
+              _buildSidebar(),
+              Expanded(
+                child: _buildMainContent(),
+              ),
+            ],
+          ),
+          if (_showAgentPanel)
+            Positioned(
+              right: 0,
+              top: 0,
+              bottom: 0,
+              child: _buildAgentTracePanel(),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSidebar() {
+    return Container(
+      width: 200,
+      color: const Color(0xFF111318),
+      child: Column(
+        children: [
+          const SizedBox(height: 24),
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: 20),
+            child: Row(children: [
+              Container(
+                width: 8, height: 8,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Color(0xFF4ADE80))),
+              const SizedBox(width: 8),
+              const Text('SmartDukan',
+                style: TextStyle(
+                  color: Color(0xFFE2E8F0),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600)),
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E293B),
+                  borderRadius:
+                    BorderRadius.circular(4)),
+                child: const Text('Beta',
+                  style: TextStyle(
+                    color: Color(0xFF94A3B8),
+                    fontSize: 9))),
+            ]),
+          ),
+          const SizedBox(height: 20),
+          Divider(
+            color: Color(0xFFE2E8F0).withOpacity(0.06),
+            height: 1),
+          const SizedBox(height: 16),
+          const Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: 20),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text('NAVIGATION',
+                style: TextStyle(
+                  color: Color(0xFF475569),
+                  fontSize: 9,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 1.2)),
+            ),
+          ),
+          const SizedBox(height: 8),
+          _navItem(0, Icons.receipt_long_outlined,
+            'Billing'),
+          _navItem(1, Icons.history_outlined,
+            'History'),
+          _navItem(2, Icons.inventory_2_outlined,
+            'Catalog'),
+          _navItem(3, Icons.help_outline_rounded,
+            'Guide'),
+          const Spacer(),
+          Divider(
+            color: Color(0xFFE2E8F0).withOpacity(0.06),
+            height: 1),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment:
+                CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Container(
+                    width: 6, height: 6,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _backendOnline
+                        ? const Color(0xFF4ADE80)
+                        : const Color(0xFFF87171))),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      _backendOnline
+                        ? 'Backend online'
+                        : 'Backend offline',
+                      style: TextStyle(
+                        color: _backendOnline
+                          ? const Color(0xFF4ADE80)
+                          : const Color(0xFFF87171),
+                        fontSize: 10))),
+                ]),
+                if (!_backendOnline) ...[
+                  const SizedBox(height: 4),
+                  GestureDetector(
+                    onTap: _checkBackendHealth,
+                    child: const Text('Retry',
+                      style: TextStyle(
+                        color: Color(0xFF4ADE80),
+                        fontSize: 10,
+                        decoration:
+                          TextDecoration.underline)),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                const Text('v0.1.0 · Spike',
+                  style: TextStyle(
+                    color: Color(0xFF334155),
+                    fontSize: 9)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _navItem(
+      int index, IconData icon, String label) {
+    final selected = _selectedNav == index;
+    return GestureDetector(
+      onTap: () => setState(() =>
+        _selectedNav = index),
+      child: Container(
+        margin: const EdgeInsets.symmetric(
+          horizontal: 10, vertical: 2),
+        padding: const EdgeInsets.symmetric(
+          horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: selected
+            ? const Color(0xFF1E293B)
+            : Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
+          border: selected ? const Border(
+            left: BorderSide(
+              color: Color(0xFF4ADE80),
+              width: 3),
+          ) : null,
+        ),
+        child: Row(children: [
+          Icon(icon,
+            size: 16,
+            color: selected
+              ? const Color(0xFF4ADE80)
+              : const Color(0xFF64748B)),
+          const SizedBox(width: 10),
+          Text(label,
+            style: TextStyle(
+              color: selected
+                ? const Color(0xFFE2E8F0)
+                : const Color(0xFF64748B),
+              fontSize: 13,
+              fontWeight: selected
+                ? FontWeight.w500
+                : FontWeight.w400)),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildMainContent() {
+    switch (_selectedNav) {
+      case 0: return _buildBillingPage();
+      case 1: return const HistoryScreen();
+      case 2: return const CatalogScreen();
+      case 3: return _buildGuideTab();
+      default: return _buildBillingPage();
+    }
+  }
+
+  Widget _buildBillingPage() {
+    return Padding(
+      padding: const EdgeInsets.all(20),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // LEFT COLUMN — controls, 300px fixed
+          SizedBox(
+            width: 300,
+            child: Column(
+              crossAxisAlignment:
+                CrossAxisAlignment.start,
+              children: [
+                // Agent toggle only — no API key field
+                _buildConfigCard(),
+                const SizedBox(height: 12),
+                // Transcript output
+                _buildTranscriptCard(),
+                const SizedBox(height: 12),
+                // Mic button card
+                _buildMicCard(),
+                const Spacer(),
+                // STT / LLM timing row
+                _buildTimingRow(),
+              ],
+            ),
+          ),
+          const SizedBox(width: 20),
+          // RIGHT COLUMN — bill table + receipt
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                CrossAxisAlignment.start,
+              children: [
+                // Bill header row
+                Row(
+                  mainAxisAlignment:
+                    MainAxisAlignment.spaceBetween,
                   children: [
-                    // ── API Key Input ──
-                    _buildApiKeyField(cs),
-                    const SizedBox(height: 16),
-      
-                    // ── Transcription output ──
-                    _buildOutputCard(cs),
-                    const SizedBox(height: 16),
-      
-                    // ── Billing Items Output ──
-                    Expanded(child: _buildBillingCard(cs)),
-                    const SizedBox(height: 16),
-      
-                    // ── Benchmark bar ──
-                    _buildBenchmarkBar(cs),
-                    const SizedBox(height: 16),
-      
-                    // ── Record button ──
-                    _buildRecordButton(cs),
-                    const SizedBox(height: 12),
-      
-                    // ── Error log ──
-                    if (_errorLog.isNotEmpty) _buildErrorBanner(cs),
+                    const Text('Extracted Bill',
+                      style: TextStyle(
+                        color: Color(0xFFE2E8F0),
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600)),
+                    Row(children: [
+                      if (_billingItems.isNotEmpty) ...[
+                        _outlinedButton(
+                          'New Bill',
+                          Icons.refresh_outlined,
+                          () => _clearBill(),
+                        ),
+                        const SizedBox(width: 8),
+                        _filledButton(
+                          'Save to History',
+                          Icons.save_outlined,
+                          _saveToHistory,
+                        ),
+                      ],
+                    ]),
                   ],
                 ),
-              ),
+                const SizedBox(height: 12),
+                // Error/status bar — only when needed
+                if (_errorLog.isNotEmpty)
+                  _buildStatusBar(),
+                SizedBox(height: _errorLog.isNotEmpty 
+                  ? 12 : 0),
+                // Bill table — scrollable
+                Expanded(
+                  child: _billingItems.isEmpty && !_isExtracting && !_isTranscribing
+                    ? _buildEmptyBillState()
+                    : SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (_isExtracting || _isTranscribing)
+                               const Center(child: Padding(padding: EdgeInsets.all(32.0), child: CircularProgressIndicator(color: Color(0xFF4ADE80))))
+                            else ...[
+                              _lastAgentResponse?.status == 'needs_clarification' ? _buildClarificationTable() : _buildBillingTable(),
+                              const SizedBox(height: 16),
+                              _buildBillSummary(),
+                              if (_lastAgentResponse?.flaggedItems.isNotEmpty == true)
+                                _buildFlaggedItemsSection()
+                            ]
+                          ],
+                        ),
+                      ),
+                ),
+              ],
             ),
-            if (_showAgentPanel) _buildAgentTracePanel(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptyBillState() {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1D27),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Color(0xFFE2E8F0).withOpacity(0.06)),
+      ),
+      child: const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.receipt_long_outlined, size: 48, color: Color(0xFF334155)),
+            SizedBox(height: 16),
+            Text('Your bill will appear here', style: TextStyle(color: Color(0xFF94A3B8), fontSize: 16)),
+            SizedBox(height: 4),
+            Text('Speak items using the mic on the left', style: TextStyle(color: Color(0xFF475569), fontSize: 13)),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildApiKeyField(ColorScheme cs) {
-    return Column(
-      children: [
-        TextField(
-          controller: _apiKeyController,
-          obscureText: true,
-          decoration: InputDecoration(
-            labelText: _useAgentBackend ? 'Groq API Key (Optional in Agent Mode)' : 'Groq API Key (Required)',
-            hintText: 'gsk_...',
-            prefixIcon: const Icon(Icons.vpn_key),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-            filled: true,
-            fillColor: cs.surfaceContainerHighest,
+  Widget _buildConfigCard() {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1D27),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: Color(0xFFE2E8F0).withOpacity(0.06)),
+      ),
+      child: Row(children: [
+        const Expanded(
+          child: Column(
+            crossAxisAlignment:
+              CrossAxisAlignment.start,
+            children: [
+              Text('Agent Mode',
+                style: TextStyle(
+                  color: Color(0xFFE2E8F0),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500)),
+              Text('LangGraph pipeline',
+                style: TextStyle(
+                  color: Color(0xFF475569),
+                  fontSize: 11)),
+            ],
           ),
         ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Switch(
-              value: _useAgentBackend,
-              onChanged: (val) {
-                setState(() => _useAgentBackend = val);
-                _checkBackendHealth();
-              },
+        Switch(
+          value: _useAgentBackend,
+          onChanged: (v) {
+            setState(() => _useAgentBackend = v);
+            _checkBackendHealth();
+          },
+          activeColor: const Color(0xFF4ADE80),
+        ),
+      ]),
+    );
+  }
+
+  Widget _buildTranscriptCard() {
+    return Container(
+      constraints: const BoxConstraints(
+        minHeight: 80, maxHeight: 160),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1D27),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: Color(0xFFE2E8F0).withOpacity(0.06)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(children: [
+            Icon(Icons.mic_none_outlined,
+              size: 13,
+              color: Color(0xFF4ADE80)),
+            SizedBox(width: 6),
+            Text('Transcript',
+              style: TextStyle(
+                color: Color(0xFF94A3B8),
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.3)),
+          ]),
+          const SizedBox(height: 8),
+          Expanded(
+            child: SingleChildScrollView(
+              child: Text(
+                _transcribedText.isEmpty
+                  ? 'Speak to see transcript here...'
+                  : _transcribedText,
+                style: TextStyle(
+                  color: _transcribedText.isEmpty
+                    ? const Color(0xFF334155)
+                    : const Color(0xFFE2E8F0),
+                  fontSize: 13,
+                  height: 1.5),
+              ),
             ),
-            Text(
-              "Use Agent Backend (LangGraph)",
-              style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
-            ),
-            const SizedBox(width: 12),
-            Container(
-              width: 8,
-              height: 8,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMicCard() {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 24),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1D27),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: _isRecording
+            ? const Color(0xFF4ADE80).withOpacity(0.4)
+            : Color(0xFFE2E8F0).withOpacity(0.06)),
+      ),
+      child: Column(
+        children: [
+          GestureDetector(
+            onTapDown: (_) => 
+              _startRecording(),
+            onTapUp: (_) => 
+              _stopRecordingAndTranscribe(),
+            onTapCancel: () =>
+              _stopRecordingAndTranscribe(),
+            child: AnimatedContainer(
+              duration: const Duration(
+                milliseconds: 200),
+              width: 64,
+              height: 64,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: _backendOnline ? const Color(0xFF00C853) : const Color(0xFFD50000),
+                color: _isRecording
+                  ? const Color(0xFF4ADE80)
+                  : const Color(0xFF1E2130),
+                border: Border.all(
+                  color: _isRecording
+                    ? const Color(0xFF4ADE80)
+                    : const Color(0xFF2D3148),
+                  width: 2),
+                boxShadow: _isRecording ? [
+                  BoxShadow(
+                    color: const Color(0xFF4ADE80)
+                      .withOpacity(0.3),
+                    blurRadius: 16,
+                    spreadRadius: 2),
+                ] : [],
+              ),
+              child: Icon(
+                _isRecording
+                  ? Icons.mic
+                  : Icons.mic_none_outlined,
+                color: _isRecording
+                  ? Colors.black
+                  : const Color(0xFF64748B),
+                size: 28,
               ),
             ),
-            const SizedBox(width: 4),
-            Text(
-              _backendStatus,
+          ),
+          const SizedBox(height: 10),
+          Center(
+            child: Text(
+              _isRecording
+                ? 'Recording...'
+                : _isTranscribing
+                  ? 'Transcribing...'
+                  : 'Hold to speak',
               style: TextStyle(
-                fontSize: 11,
-                color: _backendOnline 
-                  ? const Color(0xFF00C853) 
-                  : const Color(0xFFD50000),
-              ),
-            ),
+                color: _isRecording
+                  ? const Color(0xFF4ADE80)
+                  : const Color(0xFF475569),
+                fontSize: 12)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTimingRow() {
+    return Row(children: [
+      _timingPill(
+        Icons.graphic_eq,
+        'STT',
+        _inferenceTime),
+      const SizedBox(width: 8),
+      _timingPill(
+        Icons.memory_outlined,
+        'LLM',
+        _llmTime),
+    ]);
+  }
+
+  Widget _timingPill(
+      IconData icon, String label, String value) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1D27),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: Color(0xFFE2E8F0).withOpacity(0.06)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon,
+            size: 11,
+            color: const Color(0xFF475569)),
+          const SizedBox(width: 4),
+          Text('$label: $value',
+            style: const TextStyle(
+              color: Color(0xFF94A3B8),
+              fontSize: 11)),
+        ],
+      ),
+    );
+  }
+
+  Widget _outlinedButton(
+      String label, IconData icon, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: const Color(0xFF2D3148)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon,
+              size: 13,
+              color: const Color(0xFF94A3B8)),
+            const SizedBox(width: 6),
+            Text(label,
+              style: const TextStyle(
+                color: Color(0xFF94A3B8),
+                fontSize: 12,
+                fontWeight: FontWeight.w500)),
           ],
         ),
-        if (!_backendOnline)
-          TextButton(
-            onPressed: _checkBackendHealth,
-            child: const Text(
-              'Retry connection',
-              style: TextStyle(fontSize: 11),
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildOutputCard(ColorScheme cs) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(Icons.mic_none, size: 18, color: cs.primary),
-              const SizedBox(width: 8),
-              Text(
-                'Transcription Output',
-                style: TextStyle(fontWeight: FontWeight.w600, color: cs.onSurface),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          if (_isTranscribing)
-            const Center(
-              child: Padding(
-                padding: EdgeInsets.symmetric(vertical: 8.0),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-                    SizedBox(width: 12),
-                    Text('Transcribing with Groq…', style: TextStyle(fontSize: 13)),
-                  ],
-                ),
-              ),
-            )
-          else
-            SelectableText(
-              _transcribedText.isEmpty
-                  ? 'Enter API key, hold mic button to record.'
-                  : _transcribedText,
-              style: TextStyle(
-                fontSize: _transcribedText.isEmpty ? 14 : 16,
-                color: _transcribedText.isEmpty
-                    ? cs.onSurface.withValues(alpha: 0.4)
-                    : cs.onSurface,
-                height: 1.5,
-              ),
-            ),
-        ],
       ),
     );
   }
 
-  Widget _buildBillingCard(ColorScheme cs) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: cs.outlineVariant),
+  Widget _filledButton(
+      String label, IconData icon, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: const Color(0xFF4ADE80),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon,
+              size: 13,
+              color: Colors.black),
+            const SizedBox(width: 6),
+            Text(label,
+              style: const TextStyle(
+                color: Colors.black,
+                fontSize: 12,
+                fontWeight: FontWeight.w600)),
+          ],
+        ),
       ),
+    );
+  }
+
+  Widget _buildStatusBar() {
+    final isError = _errorLog.contains('error') ||
+      _errorLog.contains('FALLBACK') ||
+      _errorLog.contains('failed');
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: isError
+          ? const Color(0xFF450A0A)
+          : const Color(0xFF0C1A2E),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: isError
+            ? const Color(0xFFF87171).withOpacity(0.3)
+            : const Color(0xFF60A5FA).withOpacity(0.3)),
+      ),
+      child: Row(children: [
+        Icon(
+          isError
+            ? Icons.warning_amber_outlined
+            : Icons.info_outline,
+          size: 13,
+          color: isError
+            ? const Color(0xFFF87171)
+            : const Color(0xFF60A5FA)),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(_errorLog,
+            style: TextStyle(
+              color: isError
+                ? const Color(0xFFF87171)
+                : const Color(0xFF60A5FA),
+              fontSize: 11))),
+      ]),
+    );
+  }
+
+
+
+
+
+
+
+
+Widget _buildHistoryTab() {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Icon(Icons.receipt_long, size: 18, color: cs.secondary),
-              const SizedBox(width: 8),
-              Text(
-                'Extracted Billing Items',
-                style: TextStyle(fontWeight: FontWeight.w600, color: cs.onSurface),
-              ),
-              const Spacer(),
-              if (_lastAgentResponse?.status == 'needs_clarification')
-                ElevatedButton.icon(
-                  onPressed: _isExtracting ? null : _handleResolve,
-                  icon: const Icon(Icons.check_circle_outline, size: 16),
-                  label: const Text('Confirm Selections', style: TextStyle(fontSize: 12)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.amber.shade700,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Expanded(
-            child: _isExtracting
-                ? const Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        CircularProgressIndicator(),
-                        SizedBox(height: 12),
-                        Text('Extracting via LLM…', style: TextStyle(fontSize: 13)),
+              const Text('Saved Bills', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFFE2E8F0))),
+              TextButton(
+                onPressed: _billHistory.isEmpty ? null : () {
+                  showDialog(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      backgroundColor: const Color(0xFF1A1D27),
+                      title: const Text('Clear History', style: TextStyle(color: Color(0xFFE2E8F0))),
+                      content: const Text('Are you sure you want to delete all saved bills?', style: TextStyle(color: Color(0xFF94A3B8))),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: Color(0xFF94A3B8)))),
+                        TextButton(onPressed: () {
+                          setState(() => _billHistory.clear());
+                          Navigator.pop(ctx);
+                        }, child: const Text('Clear', style: TextStyle(color: Color(0xFFF87171)))),
                       ],
+                    )
+                  );
+                },
+                child: const Text('Clear History', style: TextStyle(color: Color(0xFFF87171))),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Expanded(
+            child: _billHistory.isEmpty
+                ? const Center(
+                    child: Text(
+                      "No bills saved yet.\nComplete a bill and tap Save to History.",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Color(0xFF94A3B8), fontSize: 14),
                     ),
                   )
-                : _lastAgentResponse?.status == 'needs_clarification'
-                    ? _buildClarificationTable(cs)
-                    : _billingItems.isNotEmpty
-                        ? Column(
-                            children: [
-                              Expanded(child: _buildBillingTable(cs)),
-                              if (_lastAgentResponse?.bill != null)
-                                _buildBillSummary(cs, _lastAgentResponse!.bill!),
-                            ],
-                          )
-                        : (!_useAgentBackend && _rawJson.isNotEmpty) 
-                            ? SingleChildScrollView(
-                                child: SelectableText(
-                                  _rawJson,
-                                  style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                : ListView.builder(
+                    itemCount: _billHistory.length,
+                    itemBuilder: (context, index) {
+                      final bill = _billHistory[index];
+                      final isExpanded = _expandedHistoryIndex == index;
+                      final bool isAgent = bill['source'] == 'agent';
+
+                      return Card(
+                        color: const Color(0xFF1A1D27),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          side: BorderSide(color: Color(0xFFE2E8F0).withOpacity(0.06)),
+                        ),
+                        margin: const EdgeInsets.only(bottom: 12),
+                        child: InkWell(
+                          onTap: () {
+                            setState(() {
+                              if (isExpanded) {
+                                _expandedHistoryIndex = -1;
+                              } else {
+                                _expandedHistoryIndex = index;
+                              }
+                            });
+                          },
+                          borderRadius: BorderRadius.circular(12),
+                          child: Padding(
+                            padding: const EdgeInsets.all(16.0),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text('Bill #${_billHistory.length - index}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Color(0xFFE2E8F0))),
+                                        const SizedBox(height: 4),
+                                        Text(bill['time'], style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12)),
+                                        const SizedBox(height: 8),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: isAgent ? const Color(0xFF4ADE80).withOpacity(0.2) : Color(0xFF60A5FA).withOpacity(0.2),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            isAgent ? 'Agent' : 'Direct',
+                                            style: TextStyle(color: isAgent ? const Color(0xFF4ADE80) : Color(0xFF60A5FA), fontSize: 10),
+                                          ),
+                                        )
+                                      ],
+                                    ),
+                                    Column(
+                                      crossAxisAlignment: CrossAxisAlignment.end,
+                                      children: [
+                                        Text('₹${bill['total_payable'].toStringAsFixed(2)}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFF4ADE80))),
+                                        const SizedBox(height: 4),
+                                        Text('${bill['item_count']} items', style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12)),
+                                      ],
+                                    ),
+                                  ],
                                 ),
-                              )
-                            : Center(
-                                child: Text(
-                                  'Awaiting transcription...',
-                                  style: TextStyle(color: cs.onSurface.withValues(alpha: 0.4), fontSize: 13),
-                                ),
-                              ),
+                                if (isExpanded) ...[
+                                  Divider(height: 24, color: Color(0xFFE2E8F0).withOpacity(0.06)),
+                                  SingleChildScrollView(
+                                    scrollDirection: Axis.horizontal,
+                                    child: DataTable(
+                                      headingRowColor: WidgetStateProperty.all(Color(0xFFE2E8F0).withOpacity(0.05)),
+                                      dataRowMinHeight: 40,
+                                      dataRowMaxHeight: 40,
+                                      columnSpacing: 16,
+                                      columns: const [
+                                        DataColumn(label: Text('Item', style: TextStyle(fontSize: 12))),
+                                        DataColumn(label: Text('Qty', style: TextStyle(fontSize: 12))),
+                                        DataColumn(label: Text('Total', style: TextStyle(fontSize: 12))),
+                                      ],
+                                      rows: (bill['items'] as List).map((item) {
+                                        return DataRow(
+                                          cells: [
+                                            DataCell(Text(item['name']?.toString() ?? '-', style: const TextStyle(fontSize: 12))),
+                                            DataCell(Text(item['quantity']?.toString() ?? '-', style: const TextStyle(fontSize: 12))),
+                                            DataCell(Text('₹${item['total_price'] ?? '-'}', style: const TextStyle(fontSize: 12))),
+                                          ]
+                                        );
+                                      }).toList(),
+                                    ),
+                                  )
+                                ]
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
           ),
-          if (_lastAgentResponse?.flaggedItems.isNotEmpty == true)
-            _buildFlaggedItemsSection(cs),
         ],
       ),
     );
   }
 
-  Widget _buildClarificationTable(ColorScheme cs) {
+  // ── INVENTORY TAB ──
+  
+Widget _buildInventoryTab() {
+    final filteredSkus = _skuCatalog.where((sku) => sku['name'].toString().toLowerCase().contains(_searchQuery.toLowerCase())).toList();
+
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Inventory (${_skuCatalog.length} items)', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFFE2E8F0))),
+              ElevatedButton.icon(
+                onPressed: () => _showSkuModal(),
+                icon: const Icon(Icons.add, size: 16),
+                label: const Text('Add Item'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF4ADE80),
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            onChanged: (val) => setState(() => _searchQuery = val),
+            decoration: InputDecoration(
+              hintText: 'Search items...',
+              prefixIcon: const Icon(Icons.search, color: Color(0xFF94A3B8)),
+              filled: true,
+              fillColor: const Color(0xFF1A1D27),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Expanded(
+            child: Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1D27),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Color(0xFFE2E8F0).withOpacity(0.06)),
+              ),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: SingleChildScrollView(
+                  child: DataTable(
+                    headingRowColor: WidgetStateProperty.all(Color(0xFFE2E8F0).withOpacity(0.05)),
+                    columns: const [
+                      DataColumn(label: Text('SKU ID', style: TextStyle(fontWeight: FontWeight.bold))),
+                      DataColumn(label: Text('Name', style: TextStyle(fontWeight: FontWeight.bold))),
+                      DataColumn(label: Text('Unit', style: TextStyle(fontWeight: FontWeight.bold))),
+                      DataColumn(label: Text('Price (₹)', style: TextStyle(fontWeight: FontWeight.bold))),
+                      DataColumn(label: Text('GST%', style: TextStyle(fontWeight: FontWeight.bold))),
+                      DataColumn(label: Text('Stock', style: TextStyle(fontWeight: FontWeight.bold))),
+                      DataColumn(label: Text('Actions', style: TextStyle(fontWeight: FontWeight.bold))),
+                    ],
+                    rows: filteredSkus.map((sku) {
+                      return DataRow(
+                        cells: [
+                          DataCell(Text(sku['sku_id'].toString())),
+                          DataCell(Text(sku['name'].toString())),
+                          DataCell(Text(sku['unit'].toString())),
+                          DataCell(Text(sku['unit_price'].toString())),
+                          DataCell(Text(sku['gst_slab'].toString())),
+                          DataCell(Text(sku['stock_count'].toString())),
+                          DataCell(Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.edit, size: 18, color: Color(0xFF94A3B8)),
+                                onPressed: () => _showSkuModal(sku: sku),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.delete, size: 18, color: Color(0xFFF87171)),
+                                onPressed: () => _confirmDeleteSku(sku),
+                              ),
+                            ],
+                          )),
+                        ],
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showSkuModal({Map<String, dynamic>? sku}) {
+    final bool isEdit = sku != null;
+    final nameCtrl = TextEditingController(text: isEdit ? sku['name'] : '');
+    final priceCtrl = TextEditingController(text: isEdit ? sku['unit_price'].toString() : '');
+    final stockCtrl = TextEditingController(text: isEdit ? sku['stock_count'].toString() : '100');
+    final skuIdCtrl = TextEditingController(text: isEdit ? sku['sku_id'] : '');
+    
+    int gstSlab = isEdit ? (sku['gst_slab'] as int) : 0;
+    String unit = isEdit ? sku['unit'] : 'piece';
+    bool advancedExpanded = false;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1A1D27),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            return Padding(
+              padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom, left: 24, right: 24, top: 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(isEdit ? 'Edit Item' : 'Add Item', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFFE2E8F0))),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(labelText: 'Name', filled: true, fillColor: Color(0xFF0F1117)),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: priceCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: 'Unit Price (₹)', filled: true, fillColor: Color(0xFF0F1117)),
+                  ),
+                  const SizedBox(height: 12),
+                  InkWell(
+                    onTap: () => setModalState(() => advancedExpanded = !advancedExpanded),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8.0),
+                      child: Row(
+                        children: [
+                          Text('Advanced options', style: TextStyle(color: advancedExpanded ? const Color(0xFF4ADE80) : Color(0xFF94A3B8))),
+                          Icon(advancedExpanded ? Icons.arrow_drop_up : Icons.arrow_drop_down, color: advancedExpanded ? const Color(0xFF4ADE80) : Color(0xFF94A3B8)),
+                        ],
+                      ),
+                    ),
+                  ),
+                  if (advancedExpanded) ...[
+                    const SizedBox(height: 8),
+                    DropdownButtonFormField<int>(
+                      value: gstSlab,
+                      decoration: const InputDecoration(labelText: 'GST Slab', filled: true, fillColor: Color(0xFF0F1117)),
+                      dropdownColor: const Color(0xFF1A1D27),
+                      items: [0, 5, 12, 18, 28].map((e) => DropdownMenuItem(value: e, child: Text('$e%'))).toList(),
+                      onChanged: (v) => setModalState(() => gstSlab = v!),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      value: unit,
+                      decoration: const InputDecoration(labelText: 'Unit', filled: true, fillColor: Color(0xFF0F1117)),
+                      dropdownColor: const Color(0xFF1A1D27),
+                      items: ['kg', 'packet', 'litre', 'piece', 'other'].map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
+                      onChanged: (v) => setModalState(() => unit = v!),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: stockCtrl,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: 'Stock Count', filled: true, fillColor: Color(0xFF0F1117)),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: skuIdCtrl,
+                      decoration: const InputDecoration(labelText: 'SKU ID (Auto-generated if empty)', filled: true, fillColor: Color(0xFF0F1117)),
+                    ),
+                  ],
+                  const SizedBox(height: 24),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: Color(0xFF94A3B8)))),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: () {
+                          if (nameCtrl.text.isEmpty || priceCtrl.text.isEmpty) return;
+                          
+                          setState(() {
+                            if (isEdit) {
+                              sku['name'] = nameCtrl.text;
+                              sku['unit_price'] = double.tryParse(priceCtrl.text) ?? 0.0;
+                              sku['gst_slab'] = gstSlab;
+                              sku['unit'] = unit;
+                              sku['stock_count'] = int.tryParse(stockCtrl.text) ?? 0;
+                              if (skuIdCtrl.text.isNotEmpty) sku['sku_id'] = skuIdCtrl.text;
+                            } else {
+                              _skuCatalog.insert(0, {
+                                'sku_id': skuIdCtrl.text.isNotEmpty ? skuIdCtrl.text : 'SKU${DateTime.now().millisecondsSinceEpoch.toString().substring(9)}',
+                                'name': nameCtrl.text,
+                                'unit_price': double.tryParse(priceCtrl.text) ?? 0.0,
+                                'gst_slab': gstSlab,
+                                'unit': unit,
+                                'stock_count': int.tryParse(stockCtrl.text) ?? 0,
+                              });
+                            }
+                          });
+                          Navigator.pop(ctx);
+                        },
+                        style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF4ADE80), foregroundColor: Colors.black),
+                        child: const Text('Save Changes'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 24),
+                ],
+              ),
+            );
+          }
+        );
+      }
+    );
+  }
+
+  void _confirmDeleteSku(Map<String, dynamic> sku) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1D27),
+        title: Text('Delete ${sku['name']}?', style: const TextStyle(color: Color(0xFFE2E8F0))),
+        content: const Text('This cannot be undone.', style: TextStyle(color: Color(0xFF94A3B8))),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: Color(0xFF94A3B8)))),
+          TextButton(onPressed: () {
+            setState(() => _skuCatalog.remove(sku));
+            Navigator.pop(ctx);
+          }, child: const Text('Delete', style: TextStyle(color: Color(0xFFF87171)))),
+        ],
+      )
+    );
+  }
+
+  // ── GUIDE TAB ──
+  
+Widget _buildGuideTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('How to use Voice Billing AI', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Color(0xFFE2E8F0))),
+          const SizedBox(height: 8),
+          const Text('Speak naturally. The app understands Hindi, English, and Hinglish.', style: TextStyle(fontSize: 14, color: Color(0xFF94A3B8))),
+          const SizedBox(height: 24),
+          
+          _buildGuideSectionTitle('Getting Started'),
+          _buildGuideText('Step 1: Enter your Groq API key at the top\nStep 2: Hold the mic button and speak your items\nStep 3: Release to see the extracted bill\nStep 4: Save to History when done'),
+          
+          const SizedBox(height: 24),
+          _buildGuideSectionTitle('Sample Phrases That Work Well'),
+          _buildExampleCard('Items with unit price:', 'दो किलो आलू तीस रुपये किलो\n2 kg potato at 30 rupees per kg', 'Aloo | 2 kg | ₹30/u | Tot: ₹60'),
+          _buildExampleCard('Items with total price:', 'तीन पैकेट मैगी पचास रुपये\n3 packets Maggi for 50 rupees total', 'Maggi | 3 pkt | ₹16.67/u | Tot: ₹50'),
+          _buildExampleCard('Mixed Hindi/English:', '2 kg aalu, 1 packet Maggi, aadha kilo chini', '3 items, chini flagged missing price'),
+          _buildExampleCard('Hindi fractions:', 'Dhai kilo atta, derh kilo dal', 'Atta 2.5kg, Dal 1.5kg'),
+          _buildExampleCard('Multiple items in one breath:', 'Aloo 2 kilo, pyaaz 1 kilo, tamatar आधा किलो, sab ka rate tees rupaye kilo', '3 items all at ₹30/kg'),
+
+          const SizedBox(height: 24),
+          _buildGuideSectionTitle('Agent Mode vs Direct Mode'),
+          Row(
+            children: [
+              Expanded(child: _buildModeCard('Direct Mode (toggle off)', '⚡ Faster (under 1 second)\nSimple extraction\nNo GST calculation\nNo bill total\nBest for quick billing', Color(0xFF60A5FA))),
+              const SizedBox(width: 12),
+              Expanded(child: _buildModeCard('Agent Mode (toggle on)', '🤖 Smarter processing\nGST calculated automatically\nBill total shown\nSaves to inventory\nBest for accurate bills', const Color(0xFF4ADE80))),
+            ],
+          ),
+
+          const SizedBox(height: 24),
+          _buildGuideSectionTitle('Tips'),
+          _buildGuideText('• Speak clearly, pause between items\n• Say the price after the item name\n• "rupaye kilo" means per kg price\n• "sab mila ke" means total price for all\n• You can say items in any order\n• Missing prices can be added manually'),
+          const SizedBox(height: 40),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGuideSectionTitle(String title) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12.0),
+      child: Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF4ADE80))),
+    );
+  }
+
+  Widget _buildGuideText(String text) {
+    return Text(text, style: const TextStyle(fontSize: 14, color: Color(0xFF94A3B8), height: 1.5));
+  }
+
+  Widget _buildExampleCard(String title, String quote, String expected) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: const Color(0xFF1A1D27), borderRadius: BorderRadius.circular(12), border: Border.all(color: Color(0xFFE2E8F0).withOpacity(0.06))),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.mic, size: 16, color: Color(0xFF94A3B8)),
+              const SizedBox(width: 8),
+              Text(title, style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFE2E8F0))),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text('"$quote"', style: const TextStyle(color: Color(0xFFE2E8F0), fontStyle: FontStyle.italic)),
+          const SizedBox(height: 8),
+          Text('Expected: $expected', style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildModeCard(String title, String desc, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: const Color(0xFF1A1D27), borderRadius: BorderRadius.circular(12), border: Border.all(color: color.withOpacity(0.5))),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: TextStyle(fontWeight: FontWeight.bold, color: color, fontSize: 14)),
+          const SizedBox(height: 8),
+          Text(desc, style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12, height: 1.5)),
+        ],
+      ),
+    );
+  }
+
+  // ── AGENT TRACE PANEL ──
+  
+Widget _buildAgentTracePanel() {
+    return Container(
+      width: 320,
+      decoration: BoxDecoration(
+        color: Color(0xFF1A1A2E),
+        border: Border(
+          left: BorderSide(color: Color(0xFFE2E8F0).withOpacity(0.06), width: 1),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: Color(0xFFE2E8F0).withOpacity(0.06), width: 1),
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Agent Trace',
+                  style: TextStyle(
+                    color: Color(0xFFE2E8F0),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
+                Row(
+                  children: [
+                    if (_agentTrace.isNotEmpty)
+                      GestureDetector(
+                        onTap: () => setState(() => _agentTrace = []),
+                        child: const Text(
+                          'Clear',
+                          style: TextStyle(
+                            color: Color(0xFF475569),
+                            fontSize: 11,
+                          ),
+                        ),
+                      ),
+                    const SizedBox(width: 12),
+                    GestureDetector(
+                      onTap: () => setState(() => _showAgentPanel = false),
+                      child: const Icon(Icons.close, 
+                        color: Color(0xFF475569), size: 16),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          // Trace entries
+          Expanded(
+            child: _agentTrace.isEmpty
+              ? Center(
+                  child: Text(
+                    'No agent runs yet.\nSpeak a bill with\nagent mode on.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Color(0xFFE2E8F0).withOpacity(0.06), fontSize: 12),
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.all(8),
+                  itemCount: _agentTrace.length,
+                  itemBuilder: (context, index) {
+                    final entry = _agentTrace[index];
+                    final status = entry['status'] as String;
+                    final color = status == 'done'
+                      ? const Color(0xFF4ADE80)
+                      : status == 'error'
+                        ? const Color(0xFFF87171)
+                        : status == 'running'
+                          ? const Color(0xFFFBBF24)
+                          : Color(0xFF475569);
+                    final icon = status == 'done' ? '✓'
+                      : status == 'error' ? '✗'
+                      : status == 'running' ? '⟳'
+                      : '·';
+
+                    return GestureDetector(
+                      onTap: () => setState(() {
+                        _agentTrace[index]['expanded'] = 
+                          !(_agentTrace[index]['expanded'] as bool);
+                      }),
+                      child: Container(
+                        margin: const EdgeInsets.only(bottom: 6),
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Color(0xFFE2E8F0).withOpacity(0.04),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: color.withOpacity(0.3), width: 1),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Text(icon, 
+                                  style: TextStyle(color: color, fontSize: 12)),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    entry['node'].toString().toUpperCase(),
+                                    style: TextStyle(
+                                      color: color,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 0.5,
+                                    ),
+                                  ),
+                                ),
+                                Text(
+                                  entry['time'].toString(),
+                                  style: TextStyle(
+                                    color: Color(0xFFE2E8F0).withOpacity(0.06),
+                                    fontSize: 9,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              entry['message'].toString(),
+                              style: const TextStyle(
+                                color: Color(0xFF94A3B8),
+                                fontSize: 11,
+                              ),
+                            ),
+                            if (entry['expanded'] == true && 
+                                entry['data'] != null) ...[
+                              const SizedBox(height: 6),
+                              Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  color: Colors.black26,
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  const JsonEncoder.withIndent('  ')
+                                    .convert(entry['data']),
+                                  style: const TextStyle(
+                                    color: Color(0xFF94A3B8),
+                                    fontSize: 9,
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _clearBill() {
+    setState(() {
+      _billingItems = [];
+      _transcribedText = '';
+      _rawJson = '';
+      _lastAgentResponse = null;
+      _billSaved = false;
+    });
+  }
+
+  void _saveToHistory() {
+    if (_billingItems.isEmpty) return;
+    
+    if (_billSaved) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Already saved', style: TextStyle(color: Color(0xFFE2E8F0))), backgroundColor: Color(0xFF1E293B)),
+      );
+      return;
+    }
+    
+    double subtotal = 0;
+    double totalPayable = 0;
+    
+    if (_useAgentBackend && _lastAgentResponse?.bill != null) {
+      subtotal = (_lastAgentResponse!.bill!['subtotal'] ?? 0.0).toDouble();
+      totalPayable = (_lastAgentResponse!.bill!['total_payable'] ?? 0.0).toDouble();
+    } else {
+      subtotal = _billingItems.fold(0.0, (sum, item) => sum + ((item['total_price'] as num?)?.toDouble() ?? 0.0));
+      totalPayable = subtotal;
+    }
+
+    final billMap = {
+      'id': DateTime.now().millisecondsSinceEpoch.toString(),
+      'created_at': DateTime.now().toIso8601String(),
+      'items': List<Map<String, dynamic>>.from(_billingItems),
+      'subtotal': subtotal,
+      'total_payable': totalPayable,
+      'item_count': _billingItems.length,
+      'source': _useAgentBackend ? 'agent' : 'direct',
+    };
+
+    HistoryService().saveBill(billMap);
+    
+    setState(() {
+      _billSaved = true;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Bill saved', style: TextStyle(color: Color(0xFF111827))), backgroundColor: Color(0xFF4ADE80)),
+    );
+  }
+  
+  String _getMonth(int month) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return months[month - 1];
+  }
+
+
+
+  Widget _buildClarificationTable() {
     final pending = _lastAgentResponse?.pendingClarifications ?? [];
     return SingleChildScrollView(
       child: Table(
@@ -805,11 +1827,11 @@ class _STTHomePageState extends State<STTHomePage> {
           2: IntrinsicColumnWidth(),
         },
         border: TableBorder(
-          horizontalInside: BorderSide(color: cs.outlineVariant, width: 0.5),
+          horizontalInside: BorderSide(color: Color(0xFFE2E8F0).withOpacity(0.06), width: 0.5),
         ),
         children: [
           TableRow(
-            decoration: BoxDecoration(color: Colors.amber.withValues(alpha: 0.1)),
+            decoration: BoxDecoration(color: Colors.amber.withOpacity(0.1)),
             children: const [
               Padding(padding: EdgeInsets.all(8.0), child: Text('Spoken', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
               Padding(padding: EdgeInsets.all(8.0), child: Text('Match Selection', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
@@ -822,7 +1844,7 @@ class _STTHomePageState extends State<STTHomePage> {
             final selectedSkuId = _selectedResolutions[index];
 
             return TableRow(
-              decoration: BoxDecoration(color: Colors.amber.withValues(alpha: 0.05)),
+              decoration: BoxDecoration(color: Colors.amber.withOpacity(0.05)),
               children: [
                 Padding(padding: const EdgeInsets.all(8.0), child: Text(item['name_raw'] ?? '-', style: const TextStyle(fontSize: 13))),
                 Padding(
@@ -831,7 +1853,8 @@ class _STTHomePageState extends State<STTHomePage> {
                     child: DropdownButton<String>(
                       value: selectedSkuId,
                       isExpanded: true,
-                      style: TextStyle(color: cs.onSurface, fontSize: 12),
+                      style: const TextStyle(color: Color(0xFFE2E8F0), fontSize: 12),
+                      dropdownColor: const Color(0xFF1A1D27),
                       items: candidates.map<DropdownMenuItem<String>>((c) {
                         return DropdownMenuItem<String>(
                           value: c['sku_id'],
@@ -861,44 +1884,123 @@ class _STTHomePageState extends State<STTHomePage> {
     );
   }
 
-  Widget _buildBillSummary(ColorScheme cs, Map<String, dynamic> bill) {
-    final subtotal = bill['subtotal'] ?? 0.0;
-    final total = bill['total_payable'] ?? 0.0;
-    final gst = bill['gst_breakdown'] as Map? ?? {};
+
+  Widget _buildBillingTable() {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: SingleChildScrollView(
+        child: DataTable(
+          headingRowColor: WidgetStateProperty.all(Color(0xFFE2E8F0).withOpacity(0.05)),
+          dataRowMinHeight: 52,
+          dataRowMaxHeight: 52,
+          horizontalMargin: 12,
+          columnSpacing: 20,
+          columns: const [
+            DataColumn(label: Text('#', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+            DataColumn(label: Text('Item', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+            DataColumn(label: Text('Qty', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+            DataColumn(label: Text('Unit', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+            DataColumn(label: Text('Unit Price', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+            DataColumn(label: Text('Total', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+            DataColumn(label: Text('GST%', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+            DataColumn(label: Text('Status', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+          ],
+          rows: _billingItems.asMap().entries.map((entry) {
+            final int index = entry.key;
+            final item = entry.value;
+            final bool hasError = item['missing_info'] != null;
+            
+            // Try to infer unit from name if missing
+            String unit = '-';
+            final name = item['name']?.toString().toLowerCase() ?? '';
+            if (name.contains('kg') || name.contains('kilo')) unit = 'kg';
+            else if (name.contains('packet') || name.contains('pkt')) unit = 'packet';
+            else if (name.contains('litre') || name.contains('ltr')) unit = 'litre';
+            else if (name.contains('piece') || name.contains('pc')) unit = 'piece';
+
+            Widget statusChip;
+            if (hasError) {
+              statusChip = Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(color: const Color(0xFFF87171).withOpacity(0.2), borderRadius: BorderRadius.circular(8)),
+                child: Text(item['missing_info'].toString(), style: const TextStyle(color: Color(0xFFF87171), fontSize: 11)),
+              );
+            } else {
+              statusChip = Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(color: const Color(0xFF4ADE80).withOpacity(0.2), borderRadius: BorderRadius.circular(8)),
+                child: const Text('OK', style: const TextStyle(color: Color(0xFF4ADE80), fontSize: 11)),
+              );
+            }
+
+            return DataRow(
+              color: WidgetStateProperty.resolveWith<Color?>((Set<WidgetState> states) {
+                return index % 2 == 1 ? Color(0xFFE2E8F0).withOpacity(0.02) : Colors.transparent;
+              }),
+              cells: [
+                DataCell(Text('${index + 1}', style: const TextStyle(fontSize: 13))),
+                DataCell(Text(item['name']?.toString() ?? '-', style: const TextStyle(fontSize: 13))),
+                DataCell(Text(item['quantity']?.toString() ?? '-', style: const TextStyle(fontSize: 13))),
+                DataCell(Text(unit, style: const TextStyle(fontSize: 13))),
+                DataCell(Text(item['unit_price'] != null ? '₹${item['unit_price']}' : '–', style: const TextStyle(fontSize: 13))),
+                DataCell(Text(item['total_price'] != null ? '₹${item['total_price']}' : '–', style: const TextStyle(fontSize: 13))),
+                DataCell(const Text('0%', style: TextStyle(fontSize: 13))), // Defaults to 0% if missing
+                DataCell(statusChip),
+              ],
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
+
+  Widget _buildBillSummary() {
+    double subtotal = 0;
+    double totalPayable = 0;
+    double gstCollected = 0;
+    
+    if (_useAgentBackend && _lastAgentResponse?.bill != null) {
+      subtotal = (_lastAgentResponse!.bill!['subtotal'] ?? 0.0).toDouble();
+      totalPayable = (_lastAgentResponse!.bill!['total_payable'] ?? 0.0).toDouble();
+      final gstBreakdown = _lastAgentResponse!.bill!['gst_breakdown'] as Map? ?? {};
+      gstBreakdown.forEach((k, v) => gstCollected += (v as num).toDouble());
+    } else {
+      subtotal = _billingItems.fold(0.0, (sum, item) => sum + ((item['total_price'] as num?)?.toDouble() ?? 0.0));
+      totalPayable = subtotal;
+    }
 
     return Container(
-      padding: const EdgeInsets.all(12),
-      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.only(top: 16),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cs.primary.withValues(alpha: 0.3)),
+        color: const Color(0xFF0F1117),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Color(0xFFE2E8F0).withOpacity(0.06)),
       ),
       child: Column(
         children: [
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Subtotal (Inc. GST)', style: TextStyle(fontSize: 12)),
-              Text('₹${subtotal.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold)),
+              Text('Items: ${_billingItems.length}', style: const TextStyle(fontSize: 14)),
+              Text('Subtotal: ₹${subtotal.toStringAsFixed(2)}', style: const TextStyle(fontSize: 14)),
             ],
           ),
-          ...gst.entries.map((e) => Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text('GST Collected (${e.key})', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
-                Text('₹${e.value.toStringAsFixed(2)}', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
-              ],
-            ),
-          )),
-          const Divider(height: 16),
+          const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Total Payable', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-              Text('₹${total.toStringAsFixed(2)}', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: cs.primary)),
+              const Text('GST Collected:', style: TextStyle(fontSize: 14)),
+              Text('₹${gstCollected.toStringAsFixed(2)}', style: const TextStyle(fontSize: 14)),
+            ],
+          ),
+          Divider(height: 24, color: Color(0xFFE2E8F0).withOpacity(0.06)),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('Total Payable:', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              Text('₹${totalPayable.toStringAsFixed(2)}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF4ADE80))),
             ],
           ),
         ],
@@ -906,24 +2008,25 @@ class _STTHomePageState extends State<STTHomePage> {
     );
   }
 
-  Widget _buildFlaggedItemsSection(ColorScheme cs) {
+
+  Widget _buildFlaggedItemsSection() {
     final flagged = _lastAgentResponse?.flaggedItems ?? [];
     return Container(
       margin: const EdgeInsets.only(top: 12),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: cs.errorContainer.withValues(alpha: 0.1),
+        color: const Color(0xFFF87171).withOpacity(0.1),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cs.error.withValues(alpha: 0.2)),
+        border: Border.all(color: const Color(0xFFF87171).withOpacity(0.2)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          const Row(
             children: [
-              Icon(Icons.warning_amber_rounded, size: 16, color: cs.error),
-              const SizedBox(width: 8),
-              Text('Needs Attention (Unknown items)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: cs.error)),
+              Icon(Icons.warning_amber_rounded, size: 16, color: Color(0xFFF87171)),
+              SizedBox(width: 8),
+              Text('Needs Attention (Unknown items)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFFF87171))),
             ],
           ),
           const SizedBox(height: 8),
@@ -931,7 +2034,7 @@ class _STTHomePageState extends State<STTHomePage> {
             spacing: 8,
             children: flagged.map<Widget>((f) => Chip(
               label: Text(f['name_raw'] ?? 'Unknown', style: const TextStyle(fontSize: 11)),
-              backgroundColor: cs.surface,
+              backgroundColor: const Color(0xFF0F1117),
               padding: EdgeInsets.zero,
               visualDensity: VisualDensity.compact,
             )).toList(),
@@ -941,336 +2044,4 @@ class _STTHomePageState extends State<STTHomePage> {
     );
   }
 
-  Widget _buildBillingTable(ColorScheme cs) {
-    return SingleChildScrollView(
-      child: Table(
-        columnWidths: const {
-          0: FlexColumnWidth(2.5),
-          1: FlexColumnWidth(1),
-          2: FlexColumnWidth(1.2),
-          3: FlexColumnWidth(1.5),
-        },
-        border: TableBorder(
-          horizontalInside: BorderSide(color: cs.outlineVariant, width: 0.5),
-          bottom: BorderSide(color: cs.outlineVariant, width: 0.5),
-        ),
-        children: [
-          TableRow(
-            decoration: BoxDecoration(color: cs.surfaceContainerHigh),
-            children: const [
-              Padding(padding: EdgeInsets.all(8.0), child: Text('Item', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-              Padding(padding: EdgeInsets.all(8.0), child: Text('Qty', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-              Padding(padding: EdgeInsets.all(8.0), child: Text('Unit/Tot', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-              Padding(padding: EdgeInsets.all(8.0), child: Text('Status', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-            ],
-          ),
-          ..._billingItems.map((item) {
-            final bool hasError = item['missing_info'] != null;
-            final bool isUnit = item['is_unit_price'] == true;
-            final String priceLabel = isUnit 
-                ? '${item['unit_price'] ?? '-'}/u\nTot: ${item['total_price'] ?? '-'}' 
-                : 'Tot: ${item['total_price'] ?? item['unit_price'] ?? '-'}';
-
-            return TableRow(
-              decoration: BoxDecoration(
-                color: hasError ? cs.errorContainer.withValues(alpha: 0.2) : null,
-              ),
-              children: [
-                Padding(padding: const EdgeInsets.all(8.0), child: Text(item['name']?.toString() ?? '-', style: const TextStyle(fontSize: 13))),
-                Padding(padding: const EdgeInsets.all(8.0), child: Text(item['quantity']?.toString() ?? '-', style: const TextStyle(fontSize: 13))),
-                Padding(padding: const EdgeInsets.all(8.0), child: Text(priceLabel, style: const TextStyle(fontSize: 12))),
-                Padding(
-                  padding: const EdgeInsets.all(8.0), 
-                  child: Text(
-                    item['missing_info']?.toString() ?? 'OK', 
-                    style: TextStyle(
-                      fontSize: 12, 
-                      fontWeight: FontWeight.bold,
-                      color: hasError ? cs.error : Colors.green,
-                    )
-                  )
-                ),
-              ],
-            );
-          }),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBenchmarkBar(ColorScheme cs) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          Row(
-            children: [
-              Icon(Icons.hearing, size: 16, color: cs.tertiary),
-              const SizedBox(width: 6),
-              Text('STT: $_inferenceTime', style: TextStyle(color: cs.tertiary, fontWeight: FontWeight.bold, fontSize: 13)),
-            ],
-          ),
-          Container(width: 1, height: 16, color: cs.outlineVariant),
-          Row(
-            children: [
-              Icon(Icons.psychology, size: 16, color: cs.secondary),
-              const SizedBox(width: 6),
-              Text('LLM: $_llmTime', style: TextStyle(color: cs.secondary, fontWeight: FontWeight.bold, fontSize: 13)),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildRecordButton(ColorScheme cs) {
-    final bool canRecord = !_isTranscribing && !_isExtracting;
-
-    return GestureDetector(
-      onTapDown: canRecord ? (_) => _startRecording() : null,
-      onTapUp: canRecord ? (_) => _stopRecordingAndTranscribe() : null,
-      onTapCancel: canRecord ? () => _stopRecordingAndTranscribe() : null,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        height: 72,
-        decoration: BoxDecoration(
-          color: _isRecording
-              ? Colors.red
-              : canRecord
-                  ? cs.primary
-                  : cs.onSurface.withValues(alpha: 0.2),
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: _isRecording
-              ? [
-                  BoxShadow(
-                    color: Colors.red.withValues(alpha: 0.4),
-                    blurRadius: 24,
-                    spreadRadius: 2,
-                  ),
-                ]
-              : [],
-        ),
-        child: Center(
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                _isRecording ? Icons.stop : Icons.mic,
-                color: Colors.white,
-                size: 28,
-              ),
-              const SizedBox(width: 12),
-              Text(
-                _isRecording
-                    ? 'Recording… Release to stop'
-                    : (_isTranscribing || _isExtracting)
-                        ? 'Processing…'
-                        : 'Hold to Speak',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildErrorBanner(ColorScheme cs) {
-    return Container(
-      margin: const EdgeInsets.only(top: 4),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: cs.errorContainer,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.error_outline, color: cs.error, size: 18),
-          const SizedBox(width: 8),
-          Expanded(
-            child: SelectableText(
-              _errorLog,
-              style: TextStyle(color: cs.onErrorContainer, fontSize: 12),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAgentTracePanel() {
-    return Container(
-      width: 320,
-      decoration: const BoxDecoration(
-        color: Color(0xFF1A1A2E),
-        border: Border(
-          left: BorderSide(color: Colors.white12, width: 1),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            decoration: const BoxDecoration(
-              border: Border(
-                bottom: BorderSide(color: Colors.white12, width: 1),
-              ),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Agent Trace',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 14,
-                  ),
-                ),
-                Row(
-                  children: [
-                    if (_agentTrace.isNotEmpty)
-                      GestureDetector(
-                        onTap: () => setState(() => _agentTrace = []),
-                        child: const Text(
-                          'Clear',
-                          style: TextStyle(
-                            color: Colors.white38,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ),
-                    const SizedBox(width: 12),
-                    GestureDetector(
-                      onTap: () => setState(() => _showAgentPanel = false),
-                      child: const Icon(Icons.close, 
-                        color: Colors.white38, size: 16),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-
-          // Trace entries
-          Expanded(
-            child: _agentTrace.isEmpty
-              ? const Center(
-                  child: Text(
-                    'No agent runs yet.\nSpeak a bill with\nagent mode on.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white24, fontSize: 12),
-                  ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.all(8),
-                  itemCount: _agentTrace.length,
-                  itemBuilder: (context, index) {
-                    final entry = _agentTrace[index];
-                    final status = entry['status'] as String;
-                    final color = status == 'done'
-                      ? const Color(0xFF00C853)
-                      : status == 'error'
-                        ? const Color(0xFFD50000)
-                        : status == 'running'
-                          ? const Color(0xFFFFAB00)
-                          : Colors.white38;
-                    final icon = status == 'done' ? '✓'
-                      : status == 'error' ? '✗'
-                      : status == 'running' ? '⟳'
-                      : '·';
-
-                    return GestureDetector(
-                      onTap: () => setState(() {
-                        _agentTrace[index]['expanded'] = 
-                          !(_agentTrace[index]['expanded'] as bool);
-                      }),
-                      child: Container(
-                        margin: const EdgeInsets.only(bottom: 6),
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.04),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(
-                            color: color.withOpacity(0.3), width: 1),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Text(icon, 
-                                  style: TextStyle(color: color, fontSize: 12)),
-                                const SizedBox(width: 6),
-                                Expanded(
-                                  child: Text(
-                                    entry['node'].toString().toUpperCase(),
-                                    style: TextStyle(
-                                      color: color,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                      letterSpacing: 0.5,
-                                    ),
-                                  ),
-                                ),
-                                Text(
-                                  entry['time'].toString(),
-                                  style: const TextStyle(
-                                    color: Colors.white24,
-                                    fontSize: 9,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              entry['message'].toString(),
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 11,
-                              ),
-                            ),
-                            if (entry['expanded'] == true && 
-                                entry['data'] != null) ...[
-                              const SizedBox(height: 6),
-                              Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: Colors.black26,
-                                  borderRadius: BorderRadius.circular(4),
-                                ),
-                                child: Text(
-                                  const JsonEncoder.withIndent('  ')
-                                    .convert(entry['data']),
-                                  style: const TextStyle(
-                                    color: Colors.white54,
-                                    fontSize: 9,
-                                    fontFamily: 'monospace',
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
-          ),
-        ],
-      ),
-    );
-  }
 }
