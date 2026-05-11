@@ -148,7 +148,7 @@ class _STTHomePageState extends State<STTHomePage> {
       }
 
       const config = RecordConfig(
-        encoder: AudioEncoder.wav,
+        encoder: kIsWeb ? AudioEncoder.opus : AudioEncoder.wav,
         sampleRate: 16000,
         numChannels: 1,
       );

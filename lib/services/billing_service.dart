@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:http/http.dart' as http;
+import 'package:flutter/foundation.dart';
 import 'package:whisper_hindi_stt/config.dart';
 import 'package:whisper_hindi_stt/services/catalog_service.dart';
 
@@ -58,11 +59,12 @@ class BillingService {
       print('Error loading catalog for billing: $e');
     }
 
+    final extension = kIsWeb ? 'webm' : 'wav';
     request.files.add(
       http.MultipartFile.fromBytes(
         'audio_file',
         audioBytes,
-        filename: '$sessionId.wav',
+        filename: '$sessionId.$extension',
       ),
     );
 
