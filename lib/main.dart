@@ -306,18 +306,10 @@ class _STTHomePageState extends State<STTHomePage> {
           'Total payable: ${response.bill?['total_payable']}',
           data: response.bill);
 
-        final items = response.bill?['items'] as List? ?? [];
         setState(() {
           _transcribedText = response.transcript ?? 'Agent pipeline complete';
           _rawJson = '';
-          _billingItems = items.map<Map<String, dynamic>>((item) => {
-            'name': item['name'],
-            'quantity': item['qty'],
-            'unit_price': item['unit_price'],
-            'total_price': item['total_price'],
-            'is_unit_price': true,
-            'missing_info': null,
-          }).toList();
+          _updateBillingItems(response);
         });
 
         if (response.flaggedItems.isNotEmpty) {
@@ -333,7 +325,9 @@ class _STTHomePageState extends State<STTHomePage> {
         setState(() {
           _transcribedText = 'Agent: clarification needed';
           _errorLog = 'Ambiguous items detected. Please select correct SKUs.';
+          _updateBillingItems(response);
           // Pre-select the first candidate for each pending item
+          _selectedResolutions.clear();
           for (int i = 0; i < response.pendingClarifications.length; i++) {
             final candidates = response.pendingClarifications[i]['candidates'] as List? ?? [];
             if (candidates.isNotEmpty) {
@@ -355,6 +349,28 @@ class _STTHomePageState extends State<STTHomePage> {
     }
   }
 
+  void _updateBillingItems(BillingResponse response) {
+    List<dynamic> rawItems = [];
+    if (response.status == 'complete' && response.bill != null) {
+      rawItems = response.bill!['items'] as List? ?? [];
+    } else {
+      rawItems = response.partialBill;
+    }
+
+    _billingItems = rawItems.map<Map<String, dynamic>>((item) {
+      // Handle both 'name' (from final bill) and 'sku_name' (from partial bill)
+      final name = item['name'] ?? item['sku_name'] ?? item['name_raw'] ?? 'Unknown';
+      return {
+        'name': name,
+        'quantity': item['qty'] ?? 1,
+        'unit_price': item['unit_price'] ?? 0.0,
+        'total_price': item['total_price'] ?? 0.0,
+        'is_unit_price': true,
+        'missing_info': null,
+      };
+    }).toList();
+  }
+
   Future<void> _handleResolve() async {
     if (_lastAgentResponse == null) return;
 
@@ -369,7 +385,7 @@ class _STTHomePageState extends State<STTHomePage> {
         return {
           'item_index': e.key,
           'sku_id': e.value,
-          'unit_price': 0.0, // Backend will fetch price from catalog if not provided
+          'unit_price': 0.0, 
           'name_manual': selectedCandidate['name'],
         };
       }).toList();
@@ -381,18 +397,20 @@ class _STTHomePageState extends State<STTHomePage> {
 
       setState(() {
         _lastAgentResponse = response;
+        _updateBillingItems(response);
         if (response.status == 'complete') {
-          final items = response.bill?['items'] as List? ?? [];
-          _billingItems = items.map<Map<String, dynamic>>((item) => {
-            'name': item['name'],
-            'quantity': item['qty'],
-            'unit_price': item['unit_price'],
-            'total_price': item['total_price'],
-            'is_unit_price': true,
-            'missing_info': null,
-          }).toList();
           _transcribedText = 'Agent: Resolution complete';
           _errorLog = '';
+        } else {
+          _transcribedText = 'Agent: Further clarification needed';
+          // Pre-select for next round
+          _selectedResolutions.clear();
+          for (int i = 0; i < response.pendingClarifications.length; i++) {
+            final candidates = response.pendingClarifications[i]['candidates'] as List? ?? [];
+            if (candidates.isNotEmpty) {
+              _selectedResolutions[i] = candidates[0]['sku_id'];
+            }
+          }
         }
       });
     } catch (e) {
@@ -433,18 +451,10 @@ class _STTHomePageState extends State<STTHomePage> {
       });
 
       if (response.status == 'complete') {
-        final items = response.bill?['items'] as List? ?? [];
         setState(() {
           _transcribedText = response.transcript ?? 'Direct pipeline complete';
           _rawJson = '';
-          _billingItems = items.map<Map<String, dynamic>>((item) => {
-            'name': item['name'],
-            'quantity': item['qty'],
-            'unit_price': item['unit_price'],
-            'total_price': item['total_price'],
-            'is_unit_price': true,
-            'missing_info': null,
-          }).toList();
+          _updateBillingItems(response);
         });
       } else {
         setState(() {
@@ -765,12 +775,18 @@ class _STTHomePageState extends State<STTHomePage> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            if (_isExtracting || _isTranscribing)
-                               const Center(child: Padding(padding: EdgeInsets.all(32.0), child: CircularProgressIndicator(color: Color(0xFF4ADE80))))
-                            else ...[
-                              _lastAgentResponse?.status == 'needs_clarification' ? _buildClarificationTable() : _buildBillingTable(),
-                              const SizedBox(height: 16),
-                              _buildBillSummary(),
+                            ...[
+                              if (_billingItems.isNotEmpty) _buildBillingTable(),
+                              if (_lastAgentResponse?.status == 'needs_clarification') ...[
+                                const SizedBox(height: 16),
+                                _buildClarificationTable(),
+                              ],
+                              if (_isExtracting || _isTranscribing)
+                                const Center(child: Padding(padding: EdgeInsets.all(32.0), child: CircularProgressIndicator(color: Color(0xFF4ADE80)))),
+                              if (_billingItems.isNotEmpty) ...[
+                                const SizedBox(height: 16),
+                                _buildBillSummary(),
+                              ],
                               if (_lastAgentResponse?.flaggedItems.isNotEmpty == true)
                                 _buildFlaggedItemsSection()
                             ]
